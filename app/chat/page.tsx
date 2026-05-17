@@ -69,7 +69,7 @@ export default function ChatPage() {
                 <p className="text-sm whitespace-pre-wrap">
                   {m.parts
                     .filter((p) => p.type === "text")
-                    .map((p) => p.text)
+                    .map((p) => (p as any).text)
                     .join("")}
                 </p>
               </Card>
