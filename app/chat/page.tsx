@@ -10,7 +10,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 export default function ChatPage() {
-  const { messages, status, sendMessage } = useChat({
+  const { messages, status, sendMessage, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
     }),
@@ -26,6 +26,8 @@ export default function ChatPage() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,15 +68,51 @@ export default function ChatPage() {
                     : "bg-muted"
                 }`}
               >
-                <p className="text-sm whitespace-pre-wrap">
-                  {m.parts
-                    .filter((p) => p.type === "text")
-                    .map((p) => (p as any).text)
-                    .join("")}
-                </p>
+                {m.parts.map((part, i) => {
+                  if (part.type === "text") {
+                    return (
+                      <p key={i} className="text-sm whitespace-pre-wrap">
+                        {(part as any).text}
+                      </p>
+                    );
+                  }
+                  if (typeof part.type === "string" && (part.type.startsWith("tool-") || part.type === "dynamic-tool")) {
+                    const p = part as any;
+                    if (p.state === "output-available") {
+                      let data = p.output;
+                      if (data?.content?.[0]?.text) {
+                        try { data = JSON.parse(data.content[0].text); } catch {}
+                      }
+                      if (data?.screenshotBase64) {
+                        return (
+                          <div key={i} className="my-2">
+                            <img
+                              src={`data:image/png;base64,${data.screenshotBase64}`}
+                              alt={`Screenshot`}
+                              className="rounded border max-w-full"
+                            />
+                          </div>
+                        );
+                      }
+                    }
+                    return null;
+                  }
+                  return null;
+                })}
               </Card>
             </div>
           ))}
+          {error && (
+            <div className="flex gap-3">
+              <Avatar>
+                <AvatarFallback>!</AvatarFallback>
+              </Avatar>
+              <Card className="bg-destructive/10 border-destructive/30 py-2 px-4">
+                <p className="text-sm text-destructive font-medium">API Error</p>
+                <p className="text-sm text-destructive/80 mt-1">{error.message}</p>
+              </Card>
+            </div>
+          )}
           {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
             <div className="flex gap-3">
               <Avatar>
