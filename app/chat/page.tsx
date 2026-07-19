@@ -3,11 +3,13 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useRef, useEffect, useState, useCallback } from "react";
+import { createClient } from "@/lib/supabase-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useRouter } from "next/navigation";
 
 const severityColors: Record<string, string> = {
   critical: "bg-red-100 text-red-800 border-red-300 dark:bg-red-950 dark:text-red-300 dark:border-red-800",
@@ -193,9 +195,25 @@ function ToolCallPart({ part }: { part: any }) {
 }
 
 export default function ChatPage() {
+  const router = useRouter();
+  const [userId] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      let id = localStorage.getItem("qa_agent_user_id");
+      if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem("qa_agent_user_id", id);
+      }
+      return id;
+    }
+    return crypto.randomUUID();
+  });
+  const [runId, setRunId] = useState<string | null>(null);
+  const runIdRef = useRef<string | null>(null);
+
   const { messages, status, sendMessage, error } = useChat({
     transport: new DefaultChatTransport({
       api: "/api/chat",
+      body: () => ({ runId: runIdRef.current, userId }),
     }),
   });
 
@@ -212,16 +230,28 @@ export default function ChatPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || !userId) return;
+    const newRunId = crypto.randomUUID();
+    setRunId(newRunId);
+    runIdRef.current = newRunId;
     sendMessage({ text: input });
     setInput("");
   };
 
   return (
     <div className="flex flex-col h-full max-w-3xl mx-auto w-full">
-      <header className="border-b px-6 py-4">
-        <h1 className="text-xl font-semibold">QA Agent</h1>
-        <p className="text-sm text-muted-foreground">Describe what to test in plain English</p>
+      <header className="border-b px-6 py-3 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">QA Agent</h1>
+          <p className="text-sm text-muted-foreground">Describe what to test in plain English</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {runId && (
+            <Button variant="outline" size="sm" onClick={() => router.push(`/runs/${runId}`)}>
+              View Report
+            </Button>
+          )}
+        </div>
       </header>
 
       <ScrollArea className="flex-1 p-4" ref={scrollRef}>
