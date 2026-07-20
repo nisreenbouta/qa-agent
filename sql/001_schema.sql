@@ -46,7 +46,7 @@ create table if not exists public.qa_knowledge (
   source text,
   title text,
   chunk text not null,
-  embedding vector(1536)
+  embedding vector(3072)
 );
 
 -- Indexes
@@ -55,3 +55,30 @@ create index if not exists idx_agent_steps_run_id on public.agent_steps(run_id);
 create index if not exists idx_test_runs_user_id on public.test_runs(user_id);
 create index if not exists idx_qa_knowledge_embedding on public.qa_knowledge
   using hnsw (embedding vector_cosine_ops);
+
+-- RAG: match function for pgvector similarity search
+create or replace function match_qa_knowledge(
+  query_embedding vector(3072),
+  match_threshold float default 0.7,
+  match_count int default 5
+)
+returns table (
+  id uuid,
+  source text,
+  title text,
+  chunk text,
+  similarity float
+)
+language sql stable
+as $$
+  select
+    qa_knowledge.id,
+    qa_knowledge.source,
+    qa_knowledge.title,
+    qa_knowledge.chunk,
+    1 - (qa_knowledge.embedding <=> query_embedding) as similarity
+  from qa_knowledge
+  where 1 - (qa_knowledge.embedding <=> query_embedding) > match_threshold
+  order by qa_knowledge.embedding <=> query_embedding
+  limit match_count;
+$$;

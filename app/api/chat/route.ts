@@ -1,9 +1,12 @@
-import { streamText, generateObject, convertToModelMessages, stepCountIs, UIMessage } from 'ai';
+import { streamText, generateObject, convertToModelMessages, stepCountIs, embed, UIMessage } from 'ai';
 import { google } from '@ai-sdk/google';
+
 import { createMCPClient } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
+import { z } from 'zod';
 import { TestPlanSchema } from '@/lib/types';
 import { createTestRun, finishTestRun, failTestRun, insertFinding } from '@/lib/db/queries';
+import { supabase } from '@/lib/supabase';
 
 let mcpClientPromise: Promise<Awaited<ReturnType<typeof createMCPClient>>> | null = null;
 
@@ -24,6 +27,8 @@ async function getMcpTools() {
   const client = await mcpClientPromise;
   return client.tools();
 }
+
+const embeddingModel = google.embedding('gemini-embedding-001');
 
 const model = google('gemini-2.5-flash');
 
@@ -69,6 +74,53 @@ function parseBugReports(text: string): Array<{
   return reports;
 }
 
+async function retrieveQaKnowledge({ query }: { query: string }): Promise<string> {
+  try {
+    const { embedding } = await embed({
+      model: embeddingModel,
+      value: query,
+    });
+
+    const { data, error } = await supabase.rpc('match_qa_knowledge', {
+      query_embedding: embedding,
+      match_threshold: 0.7,
+      match_count: 5,
+    });
+
+    if (error) {
+      const { data: fallback } = await supabase
+        .from('qa_knowledge')
+        .select('chunk, title, source')
+        .limit(5);
+
+      if (fallback && fallback.length > 0) {
+        return fallback.map(r => `[${r.source}] ${r.title}\n${r.chunk}`).join('\n\n---\n\n');
+      }
+      return 'No relevant knowledge found.';
+    }
+
+    if (!data || data.length === 0) {
+      return 'No relevant knowledge found.';
+    }
+
+    return data.map((r: any) => `[${r.source}] ${r.title}\n${r.chunk}`).join('\n\n---\n\n');
+  } catch {
+    return 'Knowledge base unavailable. Proceed without guidance.';
+  }
+}
+
+const ragTool = {
+  retrieve_qa_knowledge: {
+    description: `Search the QA knowledge base for relevant testing guidance, accessibility standards (WCAG), security best practices (OWASP), common bug patterns, and console error references. Use this when planning tests or investigating issues.`,
+    parameters: z.object({
+      query: z.string().describe('The specific question or topic to search for (e.g., "color contrast requirements", "SQL injection testing", "form validation bugs", "console error TypeError")'),
+    }),
+    execute: async ({ query }: { query: string }) => {
+      return await retrieveQaKnowledge({ query });
+    },
+  },
+};
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -86,7 +138,7 @@ export async function POST(req: Request) {
       const result = streamText({
         model,
         messages: modelMessages,
-        tools,
+        tools: { ...tools, ...ragTool },
         stopWhen: stepCountIs(5),
       });
       return result.toUIMessageStreamResponse({ originalMessages: messages });
@@ -142,7 +194,7 @@ Begin executing the plan now.`;
         model,
         system: executionPrompt,
         messages: modelMessages,
-        tools,
+        tools: { ...tools, ...ragTool },
         stopWhen: stepCountIs(15),
         onFinish: async ({ text }) => {
           try {
@@ -176,7 +228,7 @@ Begin executing the plan now.`;
     const result = streamText({
       model,
       messages: modelMessages,
-      tools,
+      tools: { ...tools, ...ragTool },
       stopWhen: stepCountIs(5),
     });
 
