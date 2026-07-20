@@ -1,36 +1,92 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI QA Agent
 
-## Getting Started
+An autonomous agent that tests websites the way a QA engineer would — using LLMs, RAG, MCP, and Playwright.
 
-First, run the development server:
+## How it works
+
+1. Paste a URL and plain-English testing brief
+2. The agent plans test cases, pulling in QA knowledge from a vector database (WCAG, OWASP, bug patterns)
+3. It drives a real browser through Playwright MCP — clicking, typing, taking screenshots
+4. It observes console logs, network errors, and accessibility violations
+5. A critic agent reviews findings for false positives
+6. A structured report is produced with severity, repro steps, and screenshots
+
+## Tech stack
+
+| Layer | Choice |
+|-------|--------|
+| Frontend + API | Next.js 16 (App Router) + TypeScript |
+| Styling | Tailwind v4 + shadcn/ui |
+| Agent framework | Vercel AI SDK v6 |
+| LLM | Google Gemini 2.5 Flash |
+| Browser automation | Playwright MCP (Microsoft) |
+| Database + Auth | Supabase (Postgres + pgvector) |
+| Vector search | pgvector (HNSW index on qa_knowledge) |
+| Schemas | Zod |
+
+## Getting started
 
 ```bash
+npm install
+cp .env.example .env.local
+# Add your API keys to .env.local:
+# - GOOGLE_GENERATIVE_AI_API_KEY
+# - NEXT_PUBLIC_SUPABASE_URL
+# - NEXT_PUBLIC_SUPABASE_ANON_KEY
+# - SUPABASE_SERVICE_ROLE_KEY
+
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Database setup
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+Run `sql/001_schema.sql` and `sql/002_rag_migration.sql` in your Supabase SQL editor to create the schema and pgvector match function.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Then ingest the QA knowledge corpus:
 
-## Learn More
+```bash
+npx tsx scripts/ingest-knowledge.ts
+```
 
-To learn more about Next.js, take a look at the following resources:
+### Supabase Realtime
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+For the live tool activity timeline, enable Realtime on the `agent_steps` table in your Supabase dashboard (Database → Replication).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Project structure
 
-## Deploy on Vercel
+```
+app/
+  api/chat/         — Agent route: plan → execute → summarize → critic
+  chat/             — Chat UI with Realtime timeline panel
+  runs/[id]/        — Structured report page with markdown export
+lib/
+  types.ts          — Zod schemas (TestPlan, BugReport, Analysis)
+  db/queries.ts     — Supabase CRUD for runs, findings, steps
+  supabase.ts       — Admin client (service role)
+knowledge/          — QA corpus (WCAG, OWASP, bug patterns, etc.)
+scripts/
+  ingest-knowledge.ts  — Chunk, embed, and insert knowledge corpus
+sql/
+  001_schema.sql    — Core schema + match function
+  002_rag_migration.sql  — pgvector migration for existing DBs
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## API
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `POST /api/chat` — Main agent endpoint (streams via `toUIMessageStreamResponse`)
+- `GET /api/runs/[id]/export` — Download report as Markdown
+- `GET /api/screenshot?file=name.png` — Serve local screenshots
+
+## Tools available to the agent
+
+- **Browser tools** (via Playwright MCP): navigate, click, type, screenshot, evaluate, etc.
+- **`retrieve_qa_knowledge`**: vector search over WCAG, OWASP, bug pattern docs
+- **`check_url_health`**: HTTP status, response time, security headers
+- **`check_ssl_cert`**: SSL/TLS domain check
+
+## Pipeline
+
+1. **Planner** — `generateObject` + `TestPlanSchema` → structured test plan
+2. **Executor** — `streamText` with browser tools, RAG retrieval, and URL checks
+3. **Summarizer** — `generateObject` + `AnalysisSchema` → structured findings
+4. **Critic** — reviews findings, rejects false positives and duplicates

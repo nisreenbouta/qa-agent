@@ -340,6 +340,9 @@ export default function ChatPage() {
             <p className="text-sm text-muted-foreground">Describe what to test in plain English</p>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => window.location.reload()}>
+              New Run
+            </Button>
             {runId && (
               <Button variant="outline" size="sm" onClick={() => router.push(`/runs/${runId}`)}>
                 View Report
