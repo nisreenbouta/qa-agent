@@ -53,13 +53,22 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
           </Link>
           <h1 className="text-2xl font-bold mt-1">Test Report</h1>
         </div>
-        <span className={`px-2 py-1 text-xs font-semibold rounded ${
-          run.status === "done" ? "bg-green-100 text-green-800" :
-          run.status === "failed" ? "bg-red-100 text-red-800" :
-          "bg-blue-100 text-blue-800"
-        }`}>
-          {run.status}
-        </span>
+        <div className="flex items-center gap-2">
+          <a
+            href={`/api/runs/${id}/export`}
+            download
+            className="inline-flex h-8 items-center justify-center rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted"
+          >
+            Download Markdown
+          </a>
+          <span className={`px-2 py-1 text-xs font-semibold rounded ${
+            run.status === "done" ? "bg-green-100 text-green-800" :
+            run.status === "failed" ? "bg-red-100 text-red-800" :
+            "bg-blue-100 text-blue-800"
+          }`}>
+            {run.status}
+          </span>
+        </div>
       </div>
 
       <div className="border rounded-lg p-4 space-y-2">

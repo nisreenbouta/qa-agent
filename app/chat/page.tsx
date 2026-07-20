@@ -30,6 +30,9 @@ const toolLabels: Record<string, string> = {
   browser_reload: "Reloading page",
   browser_close: "Closing page",
   browser_set_viewport_size: "Resizing viewport",
+  check_url_health: "Checking URL health",
+  check_ssl_cert: "Checking SSL cert",
+  retrieve_qa_knowledge: "Searching knowledge base",
 };
 
 function parseBugReport(text: string): { before: string; reports: Array<ReturnType<typeof parseReportBlock>>; after: string } {
@@ -194,6 +197,96 @@ function ToolCallPart({ part }: { part: any }) {
   return null;
 }
 
+interface TimelineStep {
+  id: string;
+  step_index: number;
+  tool_name: string | null;
+  tool_input: any;
+  tool_output: any;
+  thought: string | null;
+  started_at: string;
+}
+
+function TimelinePanel({ runId, visible }: { runId: string | null; visible: boolean }) {
+  const [steps, setSteps] = useState<TimelineStep[]>([]);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!runId) {
+      setSteps([]);
+      return;
+    }
+
+    const supabase = createClient();
+    setSteps([]);
+
+    const channel = supabase
+      .channel("agent-steps")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "agent_steps",
+          filter: `run_id=eq.${runId}`,
+        },
+        (payload: any) => {
+          const step = payload.new as TimelineStep;
+          setSteps((prev) => {
+            const next = [...prev, step];
+            next.sort((a, b) => a.step_index - b.step_index);
+            return next;
+          });
+        },
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [runId]);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [steps]);
+
+  if (!visible) return null;
+
+  return (
+    <div className="w-80 border-l bg-background flex flex-col shrink-0">
+      <div className="px-4 py-3 border-b">
+        <h2 className="text-sm font-semibold">Tool Activity</h2>
+        <p className="text-xs text-muted-foreground">{steps.length} steps</p>
+      </div>
+      <ScrollArea className="flex-1 p-3" ref={scrollRef}>
+        {steps.length === 0 && (
+          <p className="text-xs text-muted-foreground text-center py-8">Waiting for tool calls...</p>
+        )}
+        <div className="space-y-2">
+          {steps.map((step) => {
+            const label = toolLabels[step.tool_name || ""] || step.tool_name || "Unknown";
+            const target = step.tool_input?.url || step.tool_input?.selector || step.tool_input?.query || "";
+            return (
+              <div key={step.id} className="border rounded p-2 text-xs space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <div className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
+                  <span className="font-medium">{label}</span>
+                </div>
+                {target && <p className="truncate text-muted-foreground">{target}</p>}
+                {step.tool_output && (
+                  <div className="bg-muted rounded p-1 mt-1">
+                    <pre className="text-[10px] truncate">{JSON.stringify(step.tool_output).substring(0, 120)}</pre>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const router = useRouter();
   const [userId] = useState<string>(() => {
@@ -239,103 +332,107 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex flex-col h-full max-w-3xl mx-auto w-full">
-      <header className="border-b px-6 py-3 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">QA Agent</h1>
-          <p className="text-sm text-muted-foreground">Describe what to test in plain English</p>
-        </div>
-        <div className="flex items-center gap-2">
-          {runId && (
-            <Button variant="outline" size="sm" onClick={() => router.push(`/runs/${runId}`)}>
-              View Report
-            </Button>
-          )}
-        </div>
-      </header>
+    <div className="flex h-full">
+      <div className="flex flex-col flex-1 min-w-0">
+        <header className="border-b px-6 py-3 flex items-center justify-between shrink-0">
+          <div>
+            <h1 className="text-xl font-semibold">QA Agent</h1>
+            <p className="text-sm text-muted-foreground">Describe what to test in plain English</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {runId && (
+              <Button variant="outline" size="sm" onClick={() => router.push(`/runs/${runId}`)}>
+                View Report
+              </Button>
+            )}
+          </div>
+        </header>
 
-      <ScrollArea className="flex-1 p-4" ref={scrollRef}>
-        <div className="space-y-4">
-          {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground text-center">
-              <p className="text-lg font-medium">What should I test?</p>
-              <p className="text-sm mt-1">Try: &quot;Go to example.com and check the signup form works&quot;</p>
-            </div>
-          )}
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex gap-3 ${m.role === "user" ? "flex-row-reverse" : "flex-row"}`}
-            >
-              <Avatar>
-                <AvatarFallback>{m.role === "user" ? "U" : "AI"}</AvatarFallback>
-              </Avatar>
-              <Card
-                className={`max-w-[80%] py-2 px-4 ${m.role === "user"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted"
-                }`}
+        <ScrollArea className="flex-1 p-4" ref={scrollRef}>
+          <div className="max-w-3xl mx-auto space-y-4">
+            {messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground text-center">
+                <p className="text-lg font-medium">What should I test?</p>
+                <p className="text-sm mt-1">Try: &quot;Go to example.com and check the signup form works&quot;</p>
+              </div>
+            )}
+            {messages.map((m) => (
+              <div
+                key={m.id}
+                className={`flex gap-3 ${m.role === "user" ? "flex-row-reverse" : "flex-row"}`}
               >
-                {m.parts.map((part, i) => {
-                  if (part.type === "text") {
-                    const text = (part as any).text;
-                    const parsed = parseBugReport(text);
-                    return (
-                      <div key={i}>
-                        {parsed.before && <p className="text-sm whitespace-pre-wrap">{parsed.before}</p>}
-                        {parsed.reports.map((report, ri) => (
-                          <BugReportCard key={ri} report={report} />
-                        ))}
-                        {parsed.after && <p className="text-sm whitespace-pre-wrap mt-2">{parsed.after}</p>}
-                      </div>
-                    );
-                  }
-                  if (typeof part.type === "string" && (part.type.startsWith("tool-") || part.type === "dynamic-tool")) {
-                    return <ToolCallPart key={i} part={part} />;
-                  }
-                  return null;
-                })}
-              </Card>
-            </div>
-          ))}
-          {error && (
-            <div className="flex gap-3">
-              <Avatar>
-                <AvatarFallback>!</AvatarFallback>
-              </Avatar>
-              <Card className="bg-destructive/10 border-destructive/30 py-2 px-4">
-                <p className="text-sm text-destructive font-medium">API Error</p>
-                <p className="text-sm text-destructive/80 mt-1">{error.message}</p>
-              </Card>
-            </div>
-          )}
-          {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
-            <div className="flex gap-3">
-              <Avatar>
-                <AvatarFallback>AI</AvatarFallback>
-              </Avatar>
-              <Card className="bg-muted py-2 px-4 flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-foreground/40 animate-pulse" />
-                <p className="text-sm text-muted-foreground">Planning &amp; testing...</p>
-              </Card>
-            </div>
-          )}
-        </div>
-      </ScrollArea>
+                <Avatar>
+                  <AvatarFallback>{m.role === "user" ? "U" : "AI"}</AvatarFallback>
+                </Avatar>
+                <Card
+                  className={`max-w-[80%] py-2 px-4 ${m.role === "user"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted"
+                  }`}
+                >
+                  {m.parts.map((part, i) => {
+                    if (part.type === "text") {
+                      const text = (part as any).text;
+                      const parsed = parseBugReport(text);
+                      return (
+                        <div key={i}>
+                          {parsed.before && <p className="text-sm whitespace-pre-wrap">{parsed.before}</p>}
+                          {parsed.reports.map((report, ri) => (
+                            <BugReportCard key={ri} report={report} />
+                          ))}
+                          {parsed.after && <p className="text-sm whitespace-pre-wrap mt-2">{parsed.after}</p>}
+                        </div>
+                      );
+                    }
+                    if (typeof part.type === "string" && (part.type.startsWith("tool-") || part.type === "dynamic-tool")) {
+                      return <ToolCallPart key={i} part={part} />;
+                    }
+                    return null;
+                  })}
+                </Card>
+              </div>
+            ))}
+            {error && (
+              <div className="flex gap-3">
+                <Avatar>
+                  <AvatarFallback>!</AvatarFallback>
+                </Avatar>
+                <Card className="bg-destructive/10 border-destructive/30 py-2 px-4">
+                  <p className="text-sm text-destructive font-medium">API Error</p>
+                  <p className="text-sm text-destructive/80 mt-1">{error.message}</p>
+                </Card>
+              </div>
+            )}
+            {isLoading && messages[messages.length - 1]?.role !== "assistant" && (
+              <div className="flex gap-3">
+                <Avatar>
+                  <AvatarFallback>AI</AvatarFallback>
+                </Avatar>
+                <Card className="bg-muted py-2 px-4 flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-foreground/40 animate-pulse" />
+                  <p className="text-sm text-muted-foreground">Planning &amp; testing...</p>
+                </Card>
+              </div>
+            )}
+          </div>
+        </ScrollArea>
 
-      <form onSubmit={handleSubmit} className="border-t p-4">
-        <div className="flex gap-2">
-          <Input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder='e.g. "Go to example.com and test the form"'
-            disabled={isLoading}
-          />
-          <Button type="submit" disabled={isLoading || !input.trim()}>
-            Send
-          </Button>
-        </div>
-      </form>
+        <form onSubmit={handleSubmit} className="border-t p-4 shrink-0">
+          <div className="max-w-3xl mx-auto flex gap-2">
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder='e.g. "Go to example.com and test the form"'
+              disabled={isLoading}
+            />
+            <Button type="submit" disabled={isLoading || !input.trim()}>
+              Send
+            </Button>
+          </div>
+        </form>
+      </div>
+
+      <TimelinePanel runId={runId} visible={true} />
     </div>
   );
 }

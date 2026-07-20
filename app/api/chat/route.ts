@@ -4,8 +4,8 @@ import { google } from '@ai-sdk/google';
 import { createMCPClient } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import { z } from 'zod';
-import { TestPlanSchema, AnalysisSchema, type Analysis } from '@/lib/types';
-import { createTestRun, finishTestRun, failTestRun, insertFinding } from '@/lib/db/queries';
+import { TestPlanSchema, AnalysisSchema, BugReportSchema, type Analysis, type BugReport } from '@/lib/types';
+import { createTestRun, finishTestRun, failTestRun, insertFinding, insertAgentStep } from '@/lib/db/queries';
 import { supabase } from '@/lib/supabase';
 
 let mcpClient: Awaited<ReturnType<typeof createMCPClient>> | null = null;
@@ -45,6 +45,49 @@ Output a complete Analysis object with all findings from the transcript.`,
     schema: AnalysisSchema,
   });
   return object;
+}
+
+const CriticReviewSchema = z.object({
+  approved: z.array(BugReportSchema),
+  rejected: z.array(z.object({
+    title: z.string(),
+    reason: z.string().describe("Why this finding was rejected (false positive, duplicate, not reproducible)"),
+  })),
+});
+
+async function reviewFindings(analysis: Analysis): Promise<Analysis> {
+  const { object } = await generateObject({
+    model,
+    system: `You are a QA critic. Review the findings from a test run and filter out false positives and duplicates.
+
+For each bug report, decide whether it is:
+- A legitimate issue (approve)
+- A false positive (reject — the behavior is expected or the test was wrong)
+- A duplicate of another finding (reject and note the duplicate)
+
+Only keep findings that are real, actionable bugs. Be conservative — it's better to reject a borderline finding than to clutter the report.`,
+    prompt: `Review these findings for false positives and duplicates:
+
+Summary: ${analysis.summary}
+Passed: ${analysis.passed}, Failed: ${analysis.failed}, Warnings: ${analysis.warnings}
+
+Findings:
+${analysis.bugs.map((b, i) => `
+[${i + 1}] ${b.severity.toUpperCase()}: ${b.title}
+  Description: ${b.description}
+  Actual: ${b.actualBehavior}
+  Expected: ${b.expectedBehavior}
+  Console Errors: ${b.consoleErrors.join(", ")}
+  Steps: ${b.stepsToReproduce.join(" → ")}`).join("\n")}`,
+    schema: CriticReviewSchema,
+  });
+
+  return {
+    ...analysis,
+    bugs: object.approved,
+    failed: object.approved.filter(b => b.severity === "critical" || b.severity === "high").length,
+    warnings: object.approved.filter(b => b.severity === "medium" || b.severity === "low").length,
+  };
 }
 
 async function retrieveQaKnowledge({ query }: { query: string }): Promise<string> {
@@ -94,6 +137,50 @@ const ragTool = {
   },
 };
 
+const customTools = {
+  check_url_health: {
+    description: `Check if a URL is accessible and return HTTP status, response time, and security headers. Use this to verify pages load correctly.`,
+    parameters: z.object({
+      url: z.string().describe('The full URL to check (e.g. https://example.com/page)'),
+    }),
+    execute: async ({ url }: { url: string }) => {
+      const start = Date.now();
+      try {
+        const response = await fetch(url, { method: 'HEAD', redirect: 'follow' });
+        const duration = Date.now() - start;
+        const headers: Record<string, string> = {};
+        response.headers.forEach((value, key) => { headers[key.toLowerCase()] = value; });
+        const securityHeaders = {
+          'content-security-policy': headers['content-security-policy'] || 'missing',
+          'strict-transport-security': headers['strict-transport-security'] || 'missing',
+          'x-content-type-options': headers['x-content-type-options'] || 'missing',
+          'x-frame-options': headers['x-frame-options'] || 'missing',
+        };
+        const missing = Object.entries(securityHeaders).filter(([, v]) => v === 'missing').map(([k]) => k);
+        return JSON.stringify({ url, status: response.status, responseTimeMs: duration, contentType: headers['content-type'] || 'unknown', securityHeaders, missingSecurityHeaders: missing }, null, 2);
+      } catch (err) {
+        return JSON.stringify({ url, error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  },
+  check_ssl_cert: {
+    description: `Check SSL certificate validity for a domain. Use this to verify HTTPS is properly configured.`,
+    parameters: z.object({
+      domain: z.string().describe('Domain to check (e.g. example.com)'),
+    }),
+    execute: async ({ domain }: { domain: string }) => {
+      try {
+        const response = await fetch(`https://${domain}`, { method: 'HEAD' });
+        return JSON.stringify({ domain, accessible: true, status: response.status });
+      } catch (err) {
+        return JSON.stringify({ domain, accessible: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  },
+};
+
+const allExtraTools = { ...ragTool, ...customTools };
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -111,7 +198,7 @@ export async function POST(req: Request) {
       const result = streamText({
         model,
         messages: modelMessages,
-        tools: { ...tools, ...ragTool },
+        tools: { ...tools, ...allExtraTools },
         stopWhen: stepCountIs(5),
       });
       return result.toUIMessageStreamResponse({ originalMessages: messages });
@@ -164,15 +251,37 @@ Begin executing the plan now.`;
 
       const modelMessages = await convertToModelMessages(messages);
 
+      let stepIndex = 0;
+
       const result = streamText({
         model,
         system: executionPrompt,
         messages: modelMessages,
-        tools: { ...tools, ...ragTool },
+        tools: { ...tools, ...allExtraTools },
         stopWhen: stepCountIs(15),
+        onChunk: async ({ chunk }: any) => {
+          if (chunk.type === 'tool-call') {
+            stepIndex++;
+            insertAgentStep({
+              run_id: runId,
+              step_index: stepIndex,
+              tool_name: chunk.toolName,
+              tool_input: chunk.args,
+              thought: `Calling ${chunk.toolName}`,
+            }).catch(() => {});
+          } else if (chunk.type === 'tool-result') {
+            insertAgentStep({
+              run_id: runId,
+              step_index: stepIndex,
+              tool_name: chunk.toolName,
+              tool_output: chunk.result,
+            }).catch(() => {});
+          }
+        },
         onFinish: async ({ text }) => {
           try {
-            const analysis = await summarizeFindings(text, userInstruction, plan.url);
+            let analysis = await summarizeFindings(text, userInstruction, plan.url);
+            analysis = await reviewFindings(analysis);
 
             for (const bug of analysis.bugs) {
               await insertFinding({
@@ -209,7 +318,7 @@ Begin executing the plan now.`;
     const result = streamText({
       model,
       messages: modelMessages,
-      tools: { ...tools, ...ragTool },
+      tools: { ...tools, ...allExtraTools },
       stopWhen: stepCountIs(5),
     });
 
