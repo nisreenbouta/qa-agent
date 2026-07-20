@@ -10,6 +10,8 @@ const severityStyles: Record<string, string> = {
   info: "bg-gray-100 text-gray-800 border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-600",
 };
 
+const severityOrder = ["critical", "high", "medium", "low", "info"];
+
 async function getRun(id: string) {
   const { data: run, error } = await supabase
     .from("test_runs")
@@ -33,9 +35,17 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
   if (!data) notFound();
 
   const { run, findings } = data;
+  const summary = (run.summary || {}) as Record<string, any>;
+
+  const grouped = severityOrder
+    .map((sev) => ({
+      severity: sev,
+      items: findings.filter((f: any) => f.severity === sev),
+    }))
+    .filter((g) => g.items.length > 0);
 
   return (
-    <div className="max-w-3xl mx-auto w-full p-6 space-y-6">
+    <div className="max-w-4xl mx-auto w-full p-6 space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <Link href="/chat" className="text-sm text-muted-foreground hover:underline">
@@ -52,27 +62,49 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
         </span>
       </div>
 
-      <CardSection title="Run Details">
+      <div className="border rounded-lg p-4 space-y-2">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Run Details</h2>
         <div className="grid grid-cols-2 gap-2 text-sm">
           <div><span className="text-muted-foreground">URL:</span> {run.url}</div>
           <div><span className="text-muted-foreground">Started:</span> {new Date(run.started_at).toLocaleString()}</div>
           {run.finished_at && (
             <div><span className="text-muted-foreground">Finished:</span> {new Date(run.finished_at).toLocaleString()}</div>
           )}
-          <div><span className="text-muted-foreground">Bugs found:</span> {findings.length}</div>
+          <div><span className="text-muted-foreground">Findings:</span> {findings.length}</div>
         </div>
-      </CardSection>
+      </div>
 
       {run.brief && (
-        <CardSection title="Test Brief">
+        <div className="border rounded-lg p-4 space-y-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Test Brief</h2>
           <p className="text-sm whitespace-pre-wrap">{run.brief}</p>
-        </CardSection>
+        </div>
       )}
 
-      {findings.length > 0 && (
-        <div className="space-y-3">
-          <h2 className="text-lg font-semibold">Findings ({findings.length})</h2>
-          {findings.map((f: any) => (
+      {(summary.passed !== undefined || summary.failed !== undefined) && (
+        <div className="border rounded-lg p-4 space-y-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Summary</h2>
+          {summary.summary && <p className="text-sm">{summary.summary}</p>}
+          <div className="flex gap-4 text-sm mt-2">
+            <span className="text-green-600 dark:text-green-400 font-medium">Passed: {summary.passed ?? 0}</span>
+            <span className="text-red-600 dark:text-red-400 font-medium">Failed: {summary.failed ?? 0}</span>
+            <span className="text-yellow-600 dark:text-yellow-400 font-medium">Warnings: {summary.warnings ?? 0}</span>
+          </div>
+          {summary.consoleErrors?.length > 0 && (
+            <div className="mt-2">
+              <p className="font-medium text-xs uppercase tracking-wide text-muted-foreground mb-1">Console Errors</p>
+              {summary.consoleErrors.map((e: string, i: number) => (
+                <p key={i} className="font-mono text-xs bg-muted px-1 py-0.5 rounded mt-0.5">{e}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {grouped.map((group) => (
+        <div key={group.severity} className="space-y-3">
+          <h2 className="text-lg font-semibold capitalize">{group.severity} ({group.items.length})</h2>
+          {group.items.map((f: any) => (
             <div key={f.id} className="border rounded-lg overflow-hidden">
               <div className={`flex items-center gap-2 px-3 py-2 border-b ${severityStyles[f.severity] || severityStyles.info}`}>
                 <span className="text-xs font-bold uppercase tracking-wide">{f.severity}</span>
@@ -95,22 +127,14 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
             </div>
           ))}
         </div>
-      )}
+      ))}
 
       {findings.length === 0 && run.status === "done" && (
-        <CardSection title="No Issues Found">
+        <div className="border rounded-lg p-4 space-y-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">No Issues Found</h2>
           <p className="text-sm text-muted-foreground">All checks passed. No bugs or issues detected.</p>
-        </CardSection>
+        </div>
       )}
-    </div>
-  );
-}
-
-function CardSection({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="border rounded-lg p-4 space-y-2">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">{title}</h2>
-      {children}
     </div>
   );
 }

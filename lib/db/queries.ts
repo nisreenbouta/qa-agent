@@ -1,6 +1,7 @@
 import { supabase } from "@/lib/supabase";
 
 export async function createTestRun(data: {
+  id?: string;
   user_id: string;
   url: string;
   brief: string;

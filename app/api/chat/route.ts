@@ -4,74 +4,47 @@ import { google } from '@ai-sdk/google';
 import { createMCPClient } from '@ai-sdk/mcp';
 import { Experimental_StdioMCPTransport } from '@ai-sdk/mcp/mcp-stdio';
 import { z } from 'zod';
-import { TestPlanSchema } from '@/lib/types';
+import { TestPlanSchema, AnalysisSchema, type Analysis } from '@/lib/types';
 import { createTestRun, finishTestRun, failTestRun, insertFinding } from '@/lib/db/queries';
 import { supabase } from '@/lib/supabase';
 
-let mcpClientPromise: Promise<Awaited<ReturnType<typeof createMCPClient>>> | null = null;
+let mcpClient: Awaited<ReturnType<typeof createMCPClient>> | null = null;
 
 async function getMcpTools() {
-  if (!mcpClientPromise) {
-    mcpClientPromise = (async () => {
-      const client = await createMCPClient({
-        transport: new Experimental_StdioMCPTransport({
-          command: process.platform === 'win32' ? 'cmd.exe' : 'npx',
-          args: process.platform === 'win32'
-            ? ['/c', 'npx.cmd @playwright/mcp@latest --headless']
-            : ['@playwright/mcp@latest', '--headless'],
-        }),
-      });
-      return client;
-    })();
+  if (!mcpClient) {
+    mcpClient = await createMCPClient({
+      transport: new Experimental_StdioMCPTransport({
+        command: process.platform === 'win32' ? 'cmd.exe' : 'npx',
+        args: process.platform === 'win32'
+          ? ['/c', 'npx.cmd @playwright/mcp@latest --headless --isolated']
+          : ['@playwright/mcp@latest', '--headless', '--isolated'],
+      }),
+    });
   }
-  const client = await mcpClientPromise;
-  return client.tools();
+  return mcpClient.tools();
 }
 
 const embeddingModel = google.embedding('gemini-embedding-001');
 
 const model = google('gemini-2.5-flash');
 
-function parseBugReports(text: string): Array<{
-  title: string; severity: string; description: string;
-  steps: string[]; actual: string; expected: string;
-  consoleErrors: string[]; a11yIssues: string[]; visualIssues: string[]; recommendations: string[];
-}> {
-  const reports: Array<any> = [];
-  const regex = /## Bug Report\s*\n([\s\S]*?)(?=\n##\s|$)/g;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const block = match[1];
-    const get = (label: string) => {
-      const re = new RegExp(`\\*\\*${label}:\\*\\*\\s*(.+)`, 'i');
-      const m = block.match(re);
-      return m ? m[1].trim() : '';
-    };
-    const getList = (label: string) => {
-      const re = new RegExp(`\\*\\*${label}:\\*\\*\\s*([\\s\\S]*?)(?=\\n\\*\\*|$)`, 'i');
-      const m = block.match(re);
-      if (!m) return [];
-      return m[1].split('\n').map(l => l.replace(/^[-*]\s*/, '').trim()).filter(Boolean);
-    };
-    const getSteps = () => {
-      const m = block.match(/\*\*Steps to Reproduce:\*\*\s*([\s\S]*?)(?=\n\*\*Actual|\n\*\*Expected|\n\*\*Console|\n\*\*Accessibility|\n\*\*Visual|\n\*\*Recommendations|$)/i);
-      if (!m) return [];
-      return m[1].split('\n').map(l => l.replace(/^\d+\.\s*/, '').trim()).filter(Boolean);
-    };
-    reports.push({
-      title: get('Title'),
-      severity: get('Severity').toLowerCase(),
-      description: get('Description'),
-      steps: getSteps(),
-      actual: get('Actual Behavior'),
-      expected: get('Expected Behavior'),
-      consoleErrors: getList('Console Errors'),
-      a11yIssues: getList('Accessibility Issues'),
-      visualIssues: getList('Visual Issues'),
-      recommendations: getList('Recommendations'),
-    });
-  }
-  return reports;
+async function summarizeFindings(executionOutput: string, brief: string, url: string): Promise<Analysis> {
+  const { object } = await generateObject({
+    model,
+    system: `You are a QA test report summarizer. Given a test execution transcript, produce a structured analysis.
+
+Rate each finding by severity:
+- critical: Blocks core functionality, data loss, security issue
+- high: Major feature broken, no workaround
+- medium: Partial feature broken, workaround exists
+- low: Cosmetic or minor issue
+- info: Suggestion or observation
+
+Output a complete Analysis object with all findings from the transcript.`,
+    prompt: `## Test Brief\n${brief}\n\n## Target URL\n${url}\n\n## Execution Transcript\n${executionOutput}`,
+    schema: AnalysisSchema,
+  });
+  return object;
 }
 
 async function retrieveQaKnowledge({ query }: { query: string }): Promise<string> {
@@ -154,6 +127,7 @@ Output ONLY the plan as a JSON object matching the schema.`,
       });
 
       await createTestRun({
+        id: runId,
         user_id: userId,
         url: plan.url,
         brief: userInstruction,
@@ -198,20 +172,27 @@ Begin executing the plan now.`;
         stopWhen: stepCountIs(15),
         onFinish: async ({ text }) => {
           try {
-            const reports = parseBugReports(text);
-            for (const r of reports) {
-              if (r.severity && r.title) {
-                await insertFinding({
-                  run_id: runId,
-                  severity: ['critical', 'high', 'medium', 'low', 'info'].includes(r.severity) ? r.severity : 'info',
-                  title: r.title,
-                  description: r.description,
-                  repro_steps: r.steps,
-                  source: 'flow',
-                });
-              }
+            const analysis = await summarizeFindings(text, userInstruction, plan.url);
+
+            for (const bug of analysis.bugs) {
+              await insertFinding({
+                run_id: runId,
+                severity: bug.severity,
+                title: bug.title,
+                description: bug.description,
+                repro_steps: bug.stepsToReproduce,
+                source: 'flow',
+              });
             }
-            await finishTestRun(runId, { text, bugCount: reports.length });
+            await finishTestRun(runId, {
+              summary: analysis.summary,
+              passed: analysis.passed,
+              failed: analysis.failed,
+              warnings: analysis.warnings,
+              consoleErrors: analysis.consoleErrors,
+              accessibilityWarnings: analysis.accessibilityWarnings,
+              bugCount: analysis.bugs.length,
+            });
           } catch (err) {
             console.error("Error persisting results:", err);
             await failTestRun(runId, String(err));
